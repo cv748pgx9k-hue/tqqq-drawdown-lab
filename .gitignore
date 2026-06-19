@@ -9,3 +9,9 @@ data/
 output/
 *.csv
 *.xlsx
+
+# Public market-price seed data for Streamlit deployment.
+!data/
+!data/operator_imports/
+!data/operator_imports/daily/
+!data/operator_imports/daily/*_daily_*.csv

@@ -608,6 +608,7 @@ VALUE_LABELS = {
     "synthetic daily-reset from QQQ": "由 QQQ 每日重置模擬",
     "open adjusted by adjusted_close / close ratio": "開盤價按調整後收盤價比例校正",
     "downloaded from Yahoo Finance for public deployment; open adjusted by adjusted close ratio": "公開部署時由 Yahoo Finance 下載；開盤價按調整後收盤價比例校正",
+    "downloaded from Stooq public daily OHLC fallback; public data source used when Yahoo Finance is unavailable": "Yahoo Finance 無法提供資料時，改用 Stooq 公開日線 OHLC 備援資料",
     "QLD = 2x QQQ daily reset; TQQQ = 3x QQQ daily reset; annual drag included in proxy": "QLD = QQQ 每日 2 倍；TQQQ = QQQ 每日 3 倍；已包含年度拖累",
     "NORMAL": "正常",
     "HARD_BRIDGE": "熊市防守狀態",

@@ -1,8 +1,15 @@
 from __future__ import annotations
 
+import hashlib
+import io
+import re
+import urllib.parse
+import urllib.request
+from http.cookiejar import CookieJar
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+from urllib.error import HTTPError, URLError
 
 import numpy as np
 import pandas as pd
@@ -125,6 +132,8 @@ def load_lab_data(
     audit_rows: list[dict[str, Any]] = []
 
     for symbol in ("QQQ", "SPY", "GLD", "BIL", "QLD", "TQQQ"):
+        if params.use_synthetic_leverage and symbol in {"QLD", "TQQQ"}:
+            continue
         path = _latest_daily_csv(symbol)
         if path is not None:
             df = _read_price_csv(path)
@@ -133,9 +142,9 @@ def load_lab_data(
             notes = "open adjusted by adjusted_close / close ratio"
         else:
             df = _download_price_data(symbol, params.start, params.end)
-            file_name = "yfinance"
+            file_name = str(df.attrs.get("source", "public download"))
             mode = "public adjusted price"
-            notes = "downloaded from Yahoo Finance for public deployment; open adjusted by adjusted close ratio"
+            notes = str(df.attrs.get("notes", "public price download"))
         raw_close[symbol] = df["close"]
         raw_open[symbol] = df["open"]
         audit_rows.append(
@@ -173,12 +182,12 @@ def load_lab_data(
             audit_rows.append(
                 {
                     "Symbol": "VIX",
-                    "File": "yfinance:^VIX",
+                    "File": str(vix_df.attrs.get("source", "public download:^VIX")),
                     "Start": vix_df.index.min().date().isoformat(),
                     "End": vix_df.index.max().date().isoformat(),
                     "Rows": len(vix_df),
                     "Mode": "public signal only",
-                    "Notes": "VIX downloaded from Yahoo Finance; used only for bear-defense fast trigger",
+                    "Notes": str(vix_df.attrs.get("notes", "VIX downloaded from public source; used only for bear-defense fast trigger")),
                 }
             )
         except Exception as exc:
@@ -520,10 +529,20 @@ def _latest_daily_csv(symbol: str) -> Path | None:
 
 
 def _download_price_data(symbol: str, start: pd.Timestamp, end: pd.Timestamp) -> pd.DataFrame:
+    errors: list[str] = []
+    for loader in (_download_price_data_yahoo, _download_price_data_stooq):
+        try:
+            return loader(symbol, start, end)
+        except Exception as exc:
+            errors.append(f"{loader.__name__}: {exc}")
+    raise FileNotFoundError(f"no public price data returned for {symbol}; " + " | ".join(errors))
+
+
+def _download_price_data_yahoo(symbol: str, start: pd.Timestamp, end: pd.Timestamp) -> pd.DataFrame:
     try:
         import yfinance as yf
     except ImportError as exc:
-        raise RuntimeError("public deployment fallback requires yfinance") from exc
+        raise RuntimeError("yfinance unavailable") from exc
 
     start_ts = pd.Timestamp(start).tz_localize(None) - pd.Timedelta(days=7)
     end_ts = pd.Timestamp(end).tz_localize(None) + pd.Timedelta(days=1)
@@ -552,7 +571,105 @@ def _download_price_data(symbol: str, start: pd.Timestamp, end: pd.Timestamp) ->
     out = out[~out.index.duplicated(keep="last")]
     if out.empty:
         raise FileNotFoundError(f"no usable public price rows for {symbol}")
+    out.attrs["source"] = f"yfinance:{symbol}"
+    out.attrs["notes"] = "downloaded from Yahoo Finance for public deployment; open adjusted by adjusted close ratio"
     return out
+
+
+def _download_price_data_stooq(symbol: str, start: pd.Timestamp, end: pd.Timestamp) -> pd.DataFrame:
+    stooq_symbols = {
+        "QQQ": "qqq.us",
+        "SPY": "spy.us",
+        "GLD": "gld.us",
+        "BIL": "bil.us",
+        "QLD": "qld.us",
+        "TQQQ": "tqqq.us",
+        "^VIX": "^vix",
+    }
+    stooq_symbol = stooq_symbols.get(symbol)
+    if stooq_symbol is None:
+        raise FileNotFoundError(f"no Stooq mapping for {symbol}")
+
+    start_ts = pd.Timestamp(start).tz_localize(None) - pd.Timedelta(days=7)
+    end_ts = pd.Timestamp(end).tz_localize(None) + pd.Timedelta(days=1)
+    url = (
+        "https://stooq.com/q/d/l/"
+        f"?s={stooq_symbol}&i=d&d1={start_ts.strftime('%Y%m%d')}&d2={end_ts.strftime('%Y%m%d')}"
+    )
+    try:
+        df = _read_stooq_csv(url)
+    except (OSError, HTTPError, URLError) as exc:
+        raise RuntimeError(f"Stooq download failed for {symbol}") from exc
+    if df is None or df.empty or "Date" not in df.columns:
+        raise FileNotFoundError(f"no Stooq rows for {symbol}")
+
+    df["Date"] = pd.to_datetime(df["Date"], errors="coerce").dt.tz_localize(None)
+    raw_open = pd.to_numeric(df.get("Open"), errors="coerce")
+    raw_close = pd.to_numeric(df.get("Close"), errors="coerce")
+    out = pd.DataFrame({"open": raw_open.to_numpy(), "close": raw_close.to_numpy()}, index=df["Date"])
+    out = out.sort_index().dropna(how="all")
+    out = out.loc[(out.index >= pd.Timestamp(start)) & (out.index <= pd.Timestamp(end))]
+    out = out[~out.index.duplicated(keep="last")]
+    if out.empty:
+        raise FileNotFoundError(f"no usable Stooq rows for {symbol}")
+    out.attrs["source"] = f"stooq:{stooq_symbol}"
+    out.attrs["notes"] = "downloaded from Stooq public daily OHLC fallback; public data source used when Yahoo Finance is unavailable"
+    return out
+
+
+def _read_stooq_csv(url: str) -> pd.DataFrame:
+    cookie_jar = CookieJar()
+    opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(cookie_jar))
+
+    def fetch_text() -> str:
+        request = urllib.request.Request(
+            url,
+            headers={
+                "User-Agent": "Mozilla/5.0 (compatible; TQQQDrawdownLab/1.0)",
+                "Accept": "text/csv,text/plain,*/*",
+            },
+        )
+        with opener.open(request, timeout=20) as response:
+            return response.read().decode("utf-8", "replace")
+
+    text = fetch_text()
+    if text.lstrip().startswith("Date,"):
+        return pd.read_csv(io.StringIO(text))
+
+    if "__verify" in text:
+        match = re.search(r'c="([^"]+)",d=(\d+)', text)
+        if not match:
+            raise FileNotFoundError("Stooq verification challenge format changed")
+        challenge, difficulty_text = match.groups()
+        difficulty = int(difficulty_text)
+        prefix = "0" * difficulty
+        nonce = 0
+        while nonce < 2_000_000:
+            digest = hashlib.sha256(f"{challenge}{nonce}".encode("utf-8")).hexdigest()
+            if digest.startswith(prefix):
+                break
+            nonce += 1
+        else:
+            raise TimeoutError("Stooq verification challenge did not resolve")
+
+        body = urllib.parse.urlencode({"c": challenge, "n": str(nonce)}).encode("utf-8")
+        verify_request = urllib.request.Request(
+            "https://stooq.com/__verify",
+            data=body,
+            headers={
+                "User-Agent": "Mozilla/5.0 (compatible; TQQQDrawdownLab/1.0)",
+                "Content-Type": "application/x-www-form-urlencoded",
+            },
+        )
+        with opener.open(verify_request, timeout=20) as response:
+            if response.status >= 400:
+                raise RuntimeError(f"Stooq verification failed with status {response.status}")
+
+        text = fetch_text()
+        if text.lstrip().startswith("Date,"):
+            return pd.read_csv(io.StringIO(text))
+
+    raise FileNotFoundError("Stooq did not return CSV data")
 
 
 def _read_price_csv(path: Path) -> pd.DataFrame:
