@@ -83,6 +83,26 @@ st.markdown(
       color: var(--lab-text) !important;
       border-color: var(--lab-border) !important;
     }
+    div[data-testid="stSelectbox"] div[data-baseweb="select"] > div,
+    div[data-testid="stSelectbox"] div[data-baseweb="select"] div {
+      background: var(--lab-input) !important;
+      color: var(--lab-text) !important;
+    }
+    div[data-testid="stSelectbox"] div[data-baseweb="select"] span,
+    div[data-testid="stSelectbox"] div[data-baseweb="select"] input {
+      color: var(--lab-text) !important;
+      -webkit-text-fill-color: var(--lab-text) !important;
+    }
+    div[data-testid="stSelectbox"] div[data-baseweb="select"] svg {
+      fill: var(--lab-text) !important;
+      color: var(--lab-text) !important;
+    }
+    div[data-testid="stSelectbox"] div[aria-disabled="true"],
+    div[data-testid="stSelectbox"] div[aria-disabled="true"] * {
+      color: var(--lab-muted) !important;
+      -webkit-text-fill-color: var(--lab-muted) !important;
+      opacity: 1 !important;
+    }
     div[data-baseweb="popover"],
     div[data-baseweb="menu"],
     ul[role="listbox"] {
@@ -258,12 +278,19 @@ def strategy_text(params: BacktestLabParams, data_audit: pd.DataFrame) -> str:
     reload_funding = option_label(RELOAD_FUNDING_OPTIONS, params.reload_funding)
     a_freq = option_label(FREQ_A_OPTIONS, params.a_band_frequency)
     b_freq = option_label(FREQ_B_OPTIONS, params.b_rebalance_frequency)
+    dca_label = option_label(DCA_FREQUENCY_OPTIONS, params.recurring_contribution_frequency)
 
     lines = [
         "完整策略文字",
         "",
         f"回測期間：{params.start.date().isoformat()} 到 {params.end.date().isoformat()}。",
         f"初始本金：{params.initial_capital:,.0f}。",
+        (
+            f"定投設定：{dca_label}投入 {params.recurring_contribution_amount:,.0f}；"
+            "投入日為每個週期第一個可交易日，起始日不重複投入；定投資金按當時策略持倉比例加入。"
+            if params.recurring_contribution_frequency != "none" and params.recurring_contribution_amount > 0
+            else "定投設定：不定投。"
+        ),
         "",
         "1. 資產分組",
         f"A組進攻槓桿組佔整體 {pct_input(params.a_total)}；B組防守現金組佔整體 {pct_input(1.0 - params.a_total)}。",
@@ -475,6 +502,13 @@ RELOAD_FUNDING_OPTIONS = {
     "先用 BIL，不夠再用 GLD": "bil_then_gld",
 }
 
+DCA_FREQUENCY_OPTIONS = {
+    "不定投": "none",
+    "每月": "monthly",
+    "每季": "quarterly",
+    "每年": "annual",
+}
+
 TOPUP_ORDER_OPTIONS = {
     "先賣 GLD，再賣 SPY，最後賣 QQQ": ("B_GLD", "B_SPY", "B_QQQ"),
     "先賣 GLD，再賣 QQQ，最後賣 SPY": ("B_GLD", "B_QQQ", "B_SPY"),
@@ -485,6 +519,8 @@ TOPUP_ORDER_OPTIONS = {
 HELP_TEXT = {
     "preset": "選現成策略或自訂。預設策略只是幫你先填好參數，之後仍可手動改每一項。",
     "initial_capital": "回測起始本金。它會影響最終金額，但不會改變年化收益、回撤等百分比指標。",
+    "dca_frequency": "可設定每月、每季或每年固定投入一筆新資金。不定投時維持傳統單筆本金回測。",
+    "dca_amount": "每次定投投入的金額。定投會在每個週期第一個可交易日投入，起始日不重複投入。",
     "start_date": "回測開始日期。若早於 BIL / GLD 上市，該資產在上市前會用現金替代；QLD / TQQQ 會由 QQQ 每日漲跌模擬。",
     "end_date": "回測結束日期。通常用目前資料庫裡最新可用的交易日。",
     "a_total": "A組進攻槓桿組佔整體資產多少。B組防守現金組會自動等於 100% 減 A組。",
@@ -539,6 +575,13 @@ COLUMN_LABELS = {
     "Drawdown": "回撤",
     "CAGR": "年化收益",
     "Final Multiple": "最終倍數",
+    "Initial Capital": "初始本金",
+    "External Contributions": "外部定投",
+    "Contribution Count": "定投次數",
+    "Total Invested": "總投入",
+    "Final Equity": "最終帳戶資產",
+    "Return on Invested Capital": "投入後總回報",
+    "Money Weighted Return": "金流年化收益 XIRR",
     "MaxDD": "最大回撤",
     "Calmar": "卡瑪",
     "Sharpe": "夏普",
@@ -582,6 +625,12 @@ COLUMN_LABELS = {
     "Notes": "備註",
     "From": "原狀態",
     "To": "新狀態",
+    "Frequency": "頻率",
+    "Amount": "金額",
+    "Account Equity": "帳戶資產",
+    "Recurring Contribution": "定投金額",
+    "Account Equity Before": "投入前帳戶資產",
+    "Account Equity After": "投入後帳戶資產",
 }
 
 MONTH_LABELS = {
@@ -645,6 +694,8 @@ PERCENT_DISPLAY_COLUMNS = {
     "年化波動",
     "最差年度",
     "最差月份",
+    "投入後總回報",
+    "金流年化收益 XIRR",
     "換手率",
     "成本",
     "回報",
@@ -669,6 +720,7 @@ COUNT_DISPLAY_COLUMNS = {
     "交易次數",
     "QQQ 加倉次數",
     "SPY 加倉次數",
+    "定投次數",
     "正常狀態天數",
     "熊市防守狀態天數",
     "復原狀態天數",
@@ -677,6 +729,18 @@ COUNT_DISPLAY_COLUMNS = {
 }
 
 DECIMAL_DISPLAY_COLUMNS = {"卡瑪", "夏普", "索提諾"}
+
+MONEY_DISPLAY_COLUMNS = {
+    "初始本金",
+    "外部定投",
+    "總投入",
+    "最終帳戶資產",
+    "金額",
+    "帳戶資產",
+    "定投金額",
+    "投入前帳戶資產",
+    "投入後帳戶資產",
+}
 
 
 def is_percent_display_column(column: object) -> bool:
@@ -702,6 +766,8 @@ def format_display_number(value: object, column: object) -> object:
         return f"{number:.2%}"
     if name == "最終倍數":
         return mult(number)
+    if name in MONEY_DISPLAY_COLUMNS:
+        return money(number)
     if name in DECIMAL_DISPLAY_COLUMNS:
         return f"{number:.2f}"
     if name in COUNT_DISPLAY_COLUMNS:
@@ -752,6 +818,12 @@ with top3:
     start_date = st.date_input("開始日期", value=common_start, min_value=date(1999, 3, 10), max_value=data_end, help=HELP_TEXT["start_date"])
 with top4:
     end_date = st.date_input("結束日期", value=data_end, min_value=date(1999, 3, 10), max_value=data_end, help=HELP_TEXT["end_date"])
+dca1, dca2 = st.columns([1, 1])
+with dca1:
+    dca_frequency_label = st.selectbox("定投頻率", list(DCA_FREQUENCY_OPTIONS), index=0, help=HELP_TEXT["dca_frequency"])
+    dca_frequency = DCA_FREQUENCY_OPTIONS[dca_frequency_label]
+with dca2:
+    dca_amount = st.number_input("每次定投金額", min_value=0.0, value=0.0, step=100.0, help=HELP_TEXT["dca_amount"])
 st.markdown("</div>", unsafe_allow_html=True)
 
 if start_date >= end_date:
@@ -840,9 +912,9 @@ hb2_months = 2
 hb2_daily = 40
 hb2_window = 45
 hb2_required = 30
-vix_fast_enabled = True
+vix_fast_enabled = False
 vix_fast_threshold = 35.0
-drawdown_fast_enabled = True
+drawdown_fast_enabled = False
 drawdown_fast_threshold = -30.0
 h1, h2, h3, h4 = st.columns(4)
 with h1:
@@ -857,15 +929,27 @@ with h2:
     if trigger_mode == "daily_consecutive":
         hb2_daily = st.number_input("連續交易日", min_value=1, max_value=252, value=40, step=1, help=HELP_TEXT["hb2_daily"])
     if trigger_mode != "off":
-        vix_fast_enabled = st.toggle("VIX 快速觸發", value=True, help=HELP_TEXT["vix_fast"])
-        vix_fast_threshold = st.number_input("VIX 門檻", min_value=10.0, max_value=100.0, value=35.0, step=1.0, help=HELP_TEXT["vix_fast_threshold"])
+        vix_fast_enabled = st.toggle(
+            "VIX 快速觸發",
+            value=False,
+            key=f"vix_fast_default_off_{preset_key}",
+            help=HELP_TEXT["vix_fast"],
+        )
+        if vix_fast_enabled:
+            vix_fast_threshold = st.number_input("VIX 門檻", min_value=10.0, max_value=100.0, value=35.0, step=1.0, help=HELP_TEXT["vix_fast_threshold"])
 with h3:
     if trigger_mode in ("rolling_count", "monthly_or_rolling"):
         hb2_window = st.number_input("滾動視窗天數", min_value=5, max_value=252, value=45, step=1, help=HELP_TEXT["hb2_window"])
         hb2_required = st.number_input("視窗內達標天數", min_value=1, max_value=252, value=30, step=1, help=HELP_TEXT["hb2_required"])
     if trigger_mode != "off":
-        drawdown_fast_enabled = st.toggle("QQQ 回撤快速觸發", value=True, help=HELP_TEXT["drawdown_fast"])
-        drawdown_fast_threshold = st.number_input("QQQ 高點回撤門檻 %", min_value=-90.0, max_value=-1.0, value=-30.0, step=1.0, help=HELP_TEXT["drawdown_fast_threshold"])
+        drawdown_fast_enabled = st.toggle(
+            "QQQ 回撤快速觸發",
+            value=False,
+            key=f"drawdown_fast_default_off_{preset_key}",
+            help=HELP_TEXT["drawdown_fast"],
+        )
+        if drawdown_fast_enabled:
+            drawdown_fast_threshold = st.number_input("QQQ 高點回撤門檻 %", min_value=-90.0, max_value=-1.0, value=-30.0, step=1.0, help=HELP_TEXT["drawdown_fast_threshold"])
     if trigger_mode == "off":
         st.markdown("<div class='small-note'>熊市防守已關閉，確認參數不會生效。</div>", unsafe_allow_html=True)
 with h4:
@@ -990,6 +1074,8 @@ if run and start_date < end_date:
             start=pd.Timestamp(start_date),
             end=pd.Timestamp(end_date),
             initial_capital=float(initial_capital),
+            recurring_contribution_amount=float(dca_amount),
+            recurring_contribution_frequency=dca_frequency,
             a_total=a_total / 100.0,
             a_qqq=a_qqq / 100.0,
             a_qld=a_qld / 100.0,
@@ -1046,12 +1132,21 @@ if run and start_date < end_date:
     render_data_policy(result["data_audit"])
     st.subheader("結果總覽")
     m1, m2, m3, m4, m5, m6 = st.columns(6)
-    m1.metric("年化收益", pct(metrics["CAGR"]))
-    m2.metric("最終倍數", mult(metrics["Final Multiple"]))
-    m3.metric("最終資產", money(initial_capital * metrics["Final Multiple"]))
-    m4.metric("最大回撤", pct(metrics["MaxDD"]))
-    m5.metric("夏普", f"{metrics['Sharpe']:.2f}" if pd.notna(metrics["Sharpe"]) else "-")
-    m6.metric("交易次數", f"{metrics['Trades']}")
+    has_contributions = metrics.get("External Contributions", 0.0) > 0
+    if has_contributions:
+        m1.metric("策略年化收益", pct(metrics["CAGR"]))
+        m2.metric("策略倍數", mult(metrics["Final Multiple"]))
+        m3.metric("最終帳戶資產", money(metrics["Final Equity"]))
+        m4.metric("總投入", money(metrics["Total Invested"]))
+        m5.metric("最大回撤", pct(metrics["MaxDD"]))
+        m6.metric("XIRR", pct(metrics["Money Weighted Return"]))
+    else:
+        m1.metric("年化收益", pct(metrics["CAGR"]))
+        m2.metric("最終倍數", mult(metrics["Final Multiple"]))
+        m3.metric("最終資產", money(metrics["Final Equity"]))
+        m4.metric("最大回撤", pct(metrics["MaxDD"]))
+        m5.metric("夏普", f"{metrics['Sharpe']:.2f}" if pd.notna(metrics["Sharpe"]) else "-")
+        m6.metric("交易次數", f"{metrics['Trades']}")
 
     st.markdown(static_equity_chart_html(result["equity"]["Equity"].rename("資產淨值"), height=260), unsafe_allow_html=True)
 
@@ -1097,6 +1192,12 @@ if run and start_date < end_date:
             full_positions_display = display_df(result["positions"])
             st.dataframe(positions_display, use_container_width=True)
             st.download_button("下載完整每日權重 CSV", full_positions_display.to_csv(), "daily_weights.csv", "text/csv")
+
+    if has_contributions:
+        with st.expander("定投紀錄", expanded=False):
+            contributions_display = display_df(result["contributions"])
+            st.dataframe(contributions_display, use_container_width=True)
+            st.download_button("下載定投紀錄 CSV", contributions_display.to_csv(index=False), "recurring_contributions.csv", "text/csv")
 
     with st.expander("資料來源 / 替代口徑", expanded=False):
         st.markdown("**資料來源**")

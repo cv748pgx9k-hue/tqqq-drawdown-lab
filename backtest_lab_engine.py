@@ -51,6 +51,8 @@ class BacktestLabParams:
     start: pd.Timestamp
     end: pd.Timestamp
     initial_capital: float = 10_000.0
+    recurring_contribution_amount: float = 0.0
+    recurring_contribution_frequency: str = "none"  # none, monthly, quarterly, annual
 
     a_total: float = 0.55
     a_qqq: float = 0.0
@@ -90,9 +92,9 @@ class BacktestLabParams:
     hb2_daily_consecutive_days: int = 40
     hb2_rolling_window: int = 45
     hb2_rolling_required: int = 30
-    hb2_vix_fast_enabled: bool = True
+    hb2_vix_fast_enabled: bool = False
     hb2_vix_fast_threshold: float = 35.0
-    hb2_drawdown_fast_enabled: bool = True
+    hb2_drawdown_fast_enabled: bool = False
     hb2_drawdown_fast_threshold: float = -0.30
     hb2_qld_add_fraction: float = 0.0
     hb2_qld_keep_fraction: float = 1.0
@@ -269,6 +271,10 @@ def run_backtest_lab(params: BacktestLabParams) -> dict[str, Any]:
     pending_reason = "initial_deploy"
 
     equity = 1.0
+    account_equity = float(params.initial_capital)
+    total_recurring_contributions = 0.0
+    contribution_count = 0
+    cash_flows: list[tuple[pd.Timestamp, float]] = [(close.index[0], -float(params.initial_capital))]
     state = "NORMAL"
     bear_months = 0
     bear_daily = 0
@@ -282,6 +288,7 @@ def run_backtest_lab(params: BacktestLabParams) -> dict[str, Any]:
     position_rows: list[dict[str, Any]] = []
     trade_rows: list[dict[str, Any]] = []
     state_rows: list[dict[str, Any]] = []
+    contribution_rows: list[dict[str, Any]] = []
 
     prev_date = close.index[0]
     trades = 0
@@ -292,7 +299,10 @@ def run_backtest_lab(params: BacktestLabParams) -> dict[str, Any]:
     for i, date in enumerate(close.index):
         if i > 0:
             prev = close.index[i - 1]
+            before_equity = equity
             current, equity = _apply_returns(current, equity, close.loc[prev], open_.loc[date])
+            if before_equity > 0:
+                account_equity *= equity / before_equity
 
         if pending_target is not None and i > 0:
             before = dict(current)
@@ -300,6 +310,7 @@ def run_backtest_lab(params: BacktestLabParams) -> dict[str, Any]:
             if trade_count:
                 cost = trade_turnover * (params.one_way_slippage_bps / 10_000.0)
                 equity *= max(1.0 - cost, 0.0)
+                account_equity *= max(1.0 - cost, 0.0)
                 trades += trade_count
                 turnover += trade_turnover
                 trade_rows.append(
@@ -315,7 +326,30 @@ def run_backtest_lab(params: BacktestLabParams) -> dict[str, Any]:
             pending_target = None
             pending_reason = ""
 
+        recurring_contribution = 0.0
+        if i > 0 and _recurring_contribution_due(date, close.index[i - 1], params.recurring_contribution_frequency):
+            recurring_contribution = max(float(params.recurring_contribution_amount), 0.0)
+            if recurring_contribution > 0:
+                before_account_equity = account_equity
+                current = _add_contribution_to_current_weights(current, before_account_equity, recurring_contribution)
+                account_equity += recurring_contribution
+                total_recurring_contributions += recurring_contribution
+                contribution_count += 1
+                cash_flows.append((date, -recurring_contribution))
+                contribution_rows.append(
+                    {
+                        "Date": date.date().isoformat(),
+                        "Frequency": params.recurring_contribution_frequency,
+                        "Amount": recurring_contribution,
+                        "Account Equity Before": before_account_equity,
+                        "Account Equity After": account_equity,
+                    }
+                )
+
+        before_equity = equity
         current, equity = _apply_returns(current, equity, open_.loc[date], close.loc[date])
+        if before_equity > 0:
+            account_equity *= equity / before_equity
         current = _normalize_sleeve_weights(current)
 
         agg = _aggregate_weights(current)
@@ -323,6 +357,8 @@ def run_backtest_lab(params: BacktestLabParams) -> dict[str, Any]:
             {
                 "Date": date,
                 "Equity": equity,
+                "Account Equity": account_equity,
+                "Recurring Contribution": recurring_contribution,
                 "State": state,
                 **{f"W_{asset}": agg.get(asset, 0.0) for asset in ASSETS},
             }
@@ -399,6 +435,7 @@ def run_backtest_lab(params: BacktestLabParams) -> dict[str, Any]:
     positions_df = pd.DataFrame(position_rows).set_index("Date")
     trades_df = pd.DataFrame(trade_rows)
     state_df = pd.DataFrame(state_rows)
+    contributions_df = pd.DataFrame(contribution_rows)
     metrics = calculate_metrics(equity_df["Equity"], positions_df, trades, turnover)
     yearly = yearly_returns(equity_df["Equity"])
     monthly = monthly_returns_matrix(equity_df["Equity"])
@@ -408,6 +445,15 @@ def run_backtest_lab(params: BacktestLabParams) -> dict[str, Any]:
         {
             "Start": equity_df.index.min().date().isoformat(),
             "End": equity_df.index.max().date().isoformat(),
+            "Initial Capital": float(params.initial_capital),
+            "External Contributions": float(total_recurring_contributions),
+            "Contribution Count": int(contribution_count),
+            "Total Invested": float(params.initial_capital + total_recurring_contributions),
+            "Final Equity": float(account_equity),
+            "Return on Invested Capital": float(account_equity / (params.initial_capital + total_recurring_contributions) - 1.0)
+            if params.initial_capital + total_recurring_contributions > 0
+            else np.nan,
+            "Money Weighted Return": _xirr(cash_flows + [(equity_df.index[-1], float(account_equity))]),
             "QQQ Reload Entries": qqq_reload_entries,
             "SPY Reload Entries": spy_reload_entries,
             "Days NORMAL": int((equity_df["State"] == "NORMAL").sum()),
@@ -420,6 +466,7 @@ def run_backtest_lab(params: BacktestLabParams) -> dict[str, Any]:
         "equity": equity_df,
         "positions": positions_df,
         "trades": trades_df,
+        "contributions": contributions_df,
         "states": state_df,
         "yearly": yearly,
         "monthly": monthly,
@@ -814,6 +861,73 @@ def _apply_returns(weights: dict[str, float], equity: float, from_prices: pd.Ser
     if total <= 0:
         return weights, equity
     return {k: v / total for k, v in values.items()}, equity * total
+
+
+def _recurring_contribution_due(date: pd.Timestamp, prev_date: pd.Timestamp, frequency: str) -> bool:
+    if frequency == "none":
+        return False
+    codes = {"monthly": "M", "quarterly": "Q", "annual": "Y"}
+    code = codes.get(frequency)
+    if code is None:
+        return False
+    return date.to_period(code) != prev_date.to_period(code)
+
+
+def _add_contribution_to_current_weights(
+    current: dict[str, float],
+    account_equity: float,
+    contribution: float,
+) -> dict[str, float]:
+    if contribution <= 0:
+        return current
+    current = _normalize_sleeve_weights(current)
+    if account_equity <= 0:
+        return current
+    total = account_equity + contribution
+    if total <= 0:
+        return current
+    return {
+        sleeve: (current.get(sleeve, 0.0) * account_equity + current.get(sleeve, 0.0) * contribution) / total
+        for sleeve in SLEEVES
+    }
+
+
+def _xirr(cash_flows: list[tuple[pd.Timestamp, float]]) -> float:
+    flows = [(pd.Timestamp(date), float(amount)) for date, amount in cash_flows if amount]
+    if len(flows) < 2 or not any(amount < 0 for _, amount in flows) or not any(amount > 0 for _, amount in flows):
+        return np.nan
+    start = flows[0][0]
+
+    def npv(rate: float) -> float:
+        total = 0.0
+        for date, amount in flows:
+            years = max((date - start).days / 365.25, 0.0)
+            total += amount / ((1.0 + rate) ** years)
+        return total
+
+    low = -0.9999
+    high = 10.0
+    low_value = npv(low)
+    high_value = npv(high)
+    expand_count = 0
+    while low_value * high_value > 0 and high < 1_000 and expand_count < 20:
+        high *= 2
+        high_value = npv(high)
+        expand_count += 1
+    if low_value * high_value > 0:
+        return np.nan
+    for _ in range(100):
+        mid = (low + high) / 2
+        mid_value = npv(mid)
+        if abs(mid_value) < 1e-8:
+            return float(mid)
+        if low_value * mid_value <= 0:
+            high = mid
+            high_value = mid_value
+        else:
+            low = mid
+            low_value = mid_value
+    return float((low + high) / 2)
 
 
 def _normalize_sleeve_weights(weights: dict[str, float]) -> dict[str, float]:
